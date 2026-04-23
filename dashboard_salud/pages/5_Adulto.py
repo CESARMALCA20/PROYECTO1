@@ -1,82 +1,92 @@
 import streamlit as st
 import polars as pl
 import pandas as pd
+from pathlib import Path
 import os
 
+# Intentar forzar la carga del motor parquet
+try:
+    import pyarrow
+except ImportError:
+    st.error("Falta la librería 'pyarrow'. Agrégala a requirements.txt")
+    st.stop()
+
 # --- CONFIGURACIÓN DE PÁGINA ---
-pd.set_option("styler.render.max_elements", 1000000) 
-st.set_page_config(layout="wide", page_title="Auditoría Adulto - San Pablo")
+st.set_page_config(layout="wide", page_title="Auditoría Adulto")
 
-# ─── 1. CARGA DE DATOS ROBUSTA ───────────────────────────────────────────────
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-if os.path.basename(BASE_DIR) == "pages":
-    BASE_DIR = os.path.dirname(BASE_DIR)
-
-ARCHIVO_PARQUET = os.path.join(BASE_DIR, "data", "reporte.parquet")
+# ─── 1. LOCALIZACIÓN DEL ARCHIVO (MÉTODO ROBUSTO) ──────────────────────────
+# Obtenemos la ruta de este archivo: proyecto/pages/5_Adulto.py
+current_path = Path(__file__).resolve()
+# Subimos dos niveles para llegar a la raíz: proyecto/
+root_path = current_path.parent.parent
+# Ruta final: proyecto/data/reporte.parquet
+ARCHIVO_PARQUET = root_path / "data" / "reporte.parquet"
 
 @st.cache_data
 def cargar_datos_seguros():
-    if not os.path.exists(ARCHIVO_PARQUET):
+    if not ARCHIVO_PARQUET.exists():
         return None
     try:
-        # Forzamos pyarrow para Linux (Streamlit Cloud)
-        df = pl.read_parquet(ARCHIVO_PARQUET, use_pyarrow=True)
+        # Leemos especificando el motor pyarrow
+        df = pl.read_parquet(str(ARCHIVO_PARQUET), use_pyarrow=True)
+        
+        # Limpieza de columnas
         df = df.rename({col: col.strip() for col in df.columns})
         
-        # PROCESAMOS FECHAS AQUÍ MISMO para que el sidebar no falle
+        # Creación de columnas de tiempo INMEDIATA
         df = df.with_columns([
             pl.col("Fecha_Atencion").cast(pl.Date),
             pl.col("Fecha_Atencion").dt.month().alias("Mes_Num"),
             pl.col("Fecha_Atencion").dt.strftime("%B").alias("Mes_Nombre")
         ])
         
-        # Traducción inmediata
-        meses_es = {
+        # Traducción
+        meses_dict = {
             "January": "ENERO", "February": "FEBRERO", "March": "MARZO", "April": "ABRIL",
             "May": "MAYO", "June": "JUNIO", "July": "JULIO", "August": "AGOSTO",
             "September": "SETIEMBRE", "October": "OCTUBRE", "November": "NOVIEMBRE", "December": "DICIEMBRE"
         }
-        df = df.with_columns(pl.col("Mes_Nombre").replace(meses_es))
-        
+        df = df.with_columns(pl.col("Mes_Nombre").replace(meses_dict))
         return df
     except Exception as e:
+        st.error(f"⚠️ Error Crítico: {str(e)}")
         return None
 
-df_raw = cargar_datos_seguros()
-
-# Si falla la carga, mostramos error y detenemos antes de que intente hacer filtros
-if df_raw is None:
-    st.error("⚠️ Error: No se pudo cargar la base de datos. Verifica que 'data/reporte.parquet' exista en GitHub.")
+# Ejecución de carga
+try:
+    df_raw = cargar_datos_seguros()
+except Exception as e:
+    st.error(f"Error al ejecutar cargar_datos_seguros: {e}")
     st.stop()
 
-# ─── 2. FILTROS (SIDEBAR) ────────────────────────────────────────────────────
-st.sidebar.header("Opciones de Filtrado")
+if df_raw is None:
+    st.error(f"❌ ARCHIVO NO ENCONTRADO EN: {ARCHIVO_PARQUET}")
+    st.info("Asegúrate de que la carpeta 'data' y el archivo 'reporte.parquet' estén subidos a GitHub.")
+    st.stop()
 
-# Filtro IPRESS - Buscamos la IPRESS por defecto de forma segura
+# ─── 2. FILTROS (SIDEBAR) ──────────────────────────────────────────────────
+st.sidebar.header("Filtros de Auditoría")
+
 lista_ipress = sorted(df_raw["Nombre_Establecimiento"].unique().to_list())
-target_name = "SAN LUIS BAJO - GRANDE"
-default_sel = [i for i in lista_ipress if target_name in i]
+# Buscamos San Luis Bajo Grande de forma que no importe si hay espacios de más
+target = "SAN LUIS BAJO - GRANDE"
+default_val = [i for i in lista_ipress if target.upper() in i.upper()]
 
-sel_ipress = st.sidebar.multiselect("🏥 IPRESS", options=lista_ipress, default=default_sel)
+sel_ipress = st.sidebar.multiselect("🏥 IPRESS", options=lista_ipress, default=default_val)
 
-# Filtro Mes - Ya tenemos Mes_Nombre porque lo creamos en cargar_datos_seguros
-df_meses_lista = df_raw.select(["Mes_Num", "Mes_Nombre"]).unique().sort("Mes_Num")
-sel_mes = st.sidebar.multiselect("📅 Mes de Atención", options=df_meses_lista["Mes_Nombre"].to_list())
+meses_disp = df_raw.select(["Mes_Num", "Mes_Nombre"]).unique().sort("Mes_Num")
+sel_mes = st.sidebar.multiselect("📅 Mes", options=meses_disp["Mes_Nombre"].to_list())
 
-sel_dni = st.sidebar.text_input("🔍 Buscar por DNI")
-
-# ─── 3. PROCESAMIENTO DE DATOS ───────────────────────────────────────────────
-# Filtrar por edad Adulto
+# ─── 3. PROCESAMIENTO ──────────────────────────────────────────────────────
+# Filtro por Edad
 df_f = df_raw.filter((pl.col("Anio_Actual_Paciente") >= 30) & (pl.col("Anio_Actual_Paciente") <= 59))
 
 if sel_ipress:
     df_f = df_f.filter(pl.col("Nombre_Establecimiento").is_in(sel_ipress))
 if sel_mes:
     df_f = df_f.filter(pl.col("Mes_Nombre").is_in(sel_mes))
-if sel_dni:
-    df_f = df_f.filter(pl.col("Numero_Documento_Paciente").cast(pl.Utf8).str.contains(sel_dni))
 
-# CONFIGURACIÓN DE LOS 30 ÍTEMS (ID, Columna_Destino, Titulo_Visual)
+# CONFIGURACIÓN DE LOS 30 ÍTEMS
 ITEMS_CONFIG = [
     ("99801", "99801_TA", "99801\nPLAN ELABORADO"), ("99801", "99801_1", "99801\nPLAN EJECUTADO"),
     ("96150.01", "96150.01_VARONES", "96150.01\nVIF (VARONES)"), ("96150.01", "96150.01_MUJERES", "96150.01\nVIF (MUJERES)"),
@@ -96,58 +106,56 @@ ITEMS_CONFIG = [
 ]
 
 if not df_f.is_empty():
-    # Pivotado y limpieza
+    # Pivotado
     df_f = df_f.with_columns([
         pl.col("Codigo_Item").cast(pl.Utf8).str.strip_chars(),
         pl.col("Valor_Lab").cast(pl.Utf8).str.strip_chars().fill_null(""),
         (pl.col("Apellido_Paterno_Personal") + " " + pl.col("Apellido_Materno_Personal") + " " + pl.col("Nombres_Personal")).alias("Profesional")
     ])
 
-    codigos_validos = [c[0] for c in ITEMS_CONFIG]
+    codes = [c[0] for c in ITEMS_CONFIG]
     
-    def asignar_id(row):
-        cod, lab = row["Codigo_Item"], row["Valor_Lab"]
-        if cod == "99801": return f"99801_{lab}" if lab in ["TA", "1"] else None
-        if cod == "96150.01": return f"96150.01_{lab}" if lab in ["VARONES", "MUJERES"] else None
-        return cod if cod in codigos_validos else None
+    def get_id(row):
+        c, l = row["Codigo_Item"], row["Valor_Lab"]
+        if c == "99801": return f"99801_{l}" if l in ["TA", "1"] else None
+        if c == "96150.01": return f"96150.01_{l}" if l in ["VARONES", "MUJERES"] else None
+        return c if c in codes else None
 
     df_proc = df_f.with_columns([
-        pl.struct(["Codigo_Item", "Valor_Lab"]).map_elements(asignar_id, return_dtype=pl.Utf8).alias("ID_Columna"),
+        pl.struct(["Codigo_Item", "Valor_Lab"]).map_elements(get_id, return_dtype=pl.Utf8).alias("ID_Col"),
         pl.struct(["Fecha_Atencion", "Valor_Lab"]).map_elements(
             lambda x: f"{x['Fecha_Atencion'].strftime('%d/%m/%Y')} ({x['Valor_Lab']})" if x['Valor_Lab'] else x['Fecha_Atencion'].strftime('%d/%m/%Y'),
             return_dtype=pl.Utf8
-        ).alias("Contenido")
-    ]).filter(pl.col("ID_Columna").is_not_null())
+        ).alias("Txt")
+    ]).filter(pl.col("ID_Col").is_not_null())
 
     if not df_proc.is_empty():
-        df_piv = df_proc.pivot(values="Contenido", index="Numero_Documento_Paciente", on="ID_Columna", aggregate_function="first")
+        df_piv = df_proc.pivot(values="Txt", index="Numero_Documento_Paciente", on="ID_Col", aggregate_function="first")
         
-        df_info = df_proc.select(["Fecha_Atencion", "Lote", "Num_Pag", "Num_Reg", "Nombre_Establecimiento", 
-                                  "Numero_Documento_Paciente", "Apellido_Paterno_Paciente", "Apellido_Materno_Paciente", 
-                                  "Nombres_Paciente", "Anio_Actual_Paciente", "Genero", "Descripcion_Financiador", "Profesional"]).unique(subset=["Numero_Documento_Paciente"])
+        # Unir info de paciente
+        cols_info = ["Fecha_Atencion", "Lote", "Num_Pag", "Num_Reg", "Nombre_Establecimiento", 
+                     "Numero_Documento_Paciente", "Apellido_Paterno_Paciente", "Apellido_Materno_Paciente", 
+                     "Nombres_Paciente", "Anio_Actual_Paciente", "Genero", "Descripcion_Financiador", "Profesional"]
         
-        df_final = df_info.join(df_piv, on="Numero_Documento_Paciente", how="left").to_pandas()
+        df_base = df_proc.select(cols_info).unique(subset=["Numero_Documento_Paciente"])
+        df_final = df_base.join(df_piv, on="Numero_Documento_Paciente", how="left").to_pandas()
 
-        # Asegurar todas las columnas y renombrar
-        for _, col_id, titulo in ITEMS_CONFIG:
-            if col_id not in df_final.columns: df_final[col_id] = None
-            df_final = df_final.rename(columns={col_id: titulo})
+        # Renombrar y rellenar
+        titulos_visibles = []
+        for _, cid, t in ITEMS_CONFIG:
+            if cid not in df_final.columns: df_final[cid] = None
+            df_final = df_final.rename(columns={cid: t})
+            titulos_visibles.append(t)
 
-        titulos = [c[2] for c in ITEMS_CONFIG]
-        df_final["Realizados"] = df_final[titulos].notna().sum(axis=1)
-        df_final["Avance %"] = ((df_final["Realizados"] / 30) * 100).round(1)
-        df_final[titulos] = df_final[titulos].fillna("❌")
+        df_final["Avance %"] = (df_final[titulos_visibles].notna().sum(axis=1) / 30 * 100).round(1)
+        df_final[titulos_visibles] = df_final[titulos_visibles].fillna("❌")
 
-        # --- INTERFAZ ---
-        st.markdown(f'<h2 style="color:#38bdf8;text-align:center;">PAQUETE ADULTO: {", ".join(sel_ipress) if sel_ipress else "TODOS"}</h2>', unsafe_allow_html=True)
+        # --- MOSTRAR ---
+        st.header("📊 Seguimiento Paquete Adulto")
+        st.write(f"Mostrando data de: {', '.join(sel_ipress) if sel_ipress else 'Todas las IPRESS'}")
         
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Pacientes", len(df_final))
-        m2.metric("Avance Promedio", f"{df_final['Avance %'].mean():.1f}%")
-        m3.metric("Filtro Mes", ", ".join(sel_mes) if sel_mes else "Todos")
-
-        st.dataframe(df_final, use_container_width=True, height=600)
+        st.dataframe(df_final, use_container_width=True)
     else:
-        st.warning("No hay datos para los filtros seleccionados.")
+        st.warning("No hay datos para estos filtros.")
 else:
-    st.info("Seleccione filtros en el sidebar para comenzar.")
+    st.info("Ajuste los filtros para ver la información.")
