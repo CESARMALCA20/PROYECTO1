@@ -311,69 +311,57 @@ import polars as pl
 import streamlit as st
 from pathlib import Path
 
-# 1. Definir rutas (Detecta si estamos en 'pages' o en la raíz)
+# 1. Definir rutas
 BASE_DIR = Path(__file__).resolve().parent
 if BASE_DIR.name == "pages":
     BASE_DIR = BASE_DIR.parent
 
-# Ruta a la nueva carpeta de fragmentos
 DB_SPLIT_DIR = BASE_DIR / "data" / "db_split"
 
-# 2. Verificación de seguridad y listado de IPRESS
+# 2. Verificación de seguridad
 if not DB_SPLIT_DIR.exists():
     st.error(f"⚠️ No se encontró la carpeta: {DB_SPLIT_DIR}")
-    st.info("Asegúrate de haber subido la carpeta 'db_split' a GitHub dentro de 'data'.")
     st.stop()
 
-# Listamos los archivos .parquet disponibles
+# Listamos archivos y creamos el mapa
 archivos_parquet = sorted([f.name for f in DB_SPLIT_DIR.glob("*.parquet")])
 nombres_ipress = [f.replace(".parquet", "").replace("_", " ") for f in archivos_parquet]
 mapa_archivos = dict(zip(nombres_ipress, archivos_parquet))
 
-# 3. Selector en la barra lateral (Carga bajo demanda)
-st.sidebar.header("Opciones de Carga")
-# Valor por defecto sugerido
+# 3. Selector en la barra lateral
+st.sidebar.header("Configuración de Auditoría")
+
+# Forzamos que por defecto busque San Luis Bajo - Grande si existe, sino la primera de la lista
 default_ipress = "SAN LUIS BAJO - GRANDE"
 idx_default = 0
-if any(default_ipress in n for n in nombres_ipress):
-    idx_default = nombres_ipress.index(next(n for n in nombres_ipress if default_ipress in n))
+for i, nombre in enumerate(nombres_ipress):
+    if default_ipress in nombre.upper():
+        idx_default = i
+        break
 
-sel_ipress = st.sidebar.selectbox("🏥 Seleccione IPRESS", options=nombres_ipress, index=idx_default)
+# El widget que dispara el cambio de datos
+sel_ipress = st.sidebar.selectbox("🏥 Seleccione IPRESS", options=nombres_ipress, index=idx_default, key="selector_principal_ipress")
 
-@st.cache_data
-def cargar_datos_fragmentados(nombre_sel):
-    nombre_archivo = mapa_archivos[nombre_sel]
+# Agregamos 'validate_hashes=False' y un parámetro de entrada claro para el caché
+@st.cache_data(show_spinner="Cargando datos de la IPRESS...")
+def cargar_datos_fragmentados(nombre_seleccionado):
+    nombre_archivo = mapa_archivos[nombre_seleccionado]
     ruta_archivo = DB_SPLIT_DIR / nombre_archivo
-    try:
-        # Carga solo el pedacito seleccionado (Veloz y ligero)
-        df = pl.read_parquet(str(ruta_archivo))
-        # Limpieza de nombres de columnas
-        df = df.rename({col: col.strip() for col in df.columns})
-        return df, ruta_archivo
-    except Exception as e:
-        st.error(f"Error técnico al leer el fragmento: {e}")
-        return None, None
+    
+    # Lectura limpia
+    df = pl.read_parquet(str(ruta_archivo))
+    
+    # Limpieza de nombres de columnas
+    df = df.rename({col: col.strip() for col in df.columns})
+    
+    return df, ruta_archivo
 
-# Ejecución de la carga (Aquí nace el df_raw que usa el resto de tu código)
+# Ejecución de la carga: cada vez que sel_ipress cambie, esta función se re-ejecuta
 df_raw, ruta_usada = cargar_datos_fragmentados(sel_ipress)
 
-if df_raw is None:
-    st.stop()
-
-# ── Fecha de última modificación (para el badge del topbar) ──
-import datetime as _dt
-try:
-    _mtime = os.path.getmtime(ruta_usada)
-    _fecha_excel = _dt.datetime.fromtimestamp(_mtime).strftime("%d/%m/%Y %H:%M")
-except Exception:
-    _fecha_excel = "N/D"
-
-st.markdown(f"""<script>
-(function(){{
-    var badge = document.getElementById('topbar-badge-fecha');
-    if(badge) badge.innerHTML = '⬤ &nbsp;Actualizado: {_fecha_excel}';
-}})();
-</script>""", unsafe_allow_html=True)
+# --- IMPORTANTE ---
+# Si tenías un filtro manual de "Nombre_Establecimiento" más abajo en tu código, 
+# DEBES BORRARLO o comentarlo, porque df_raw ya contiene SOLO los datos de la IPRESS elegida.
 
 # ─── 4. FILTROS ───────────────────────────────────────────────────────────────
 import datetime, calendar as _cal
