@@ -1,6 +1,0 @@
-polars
-streamlit
-pandas
-plotly
-openpyxl
-pyarrow
