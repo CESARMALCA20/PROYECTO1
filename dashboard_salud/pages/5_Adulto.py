@@ -1,119 +1,117 @@
 import streamlit as st
-import polars as pl
-import pandas as pd
-from pathlib import Path
 import os
 
-# 1. CONFIGURACIÓN DE PÁGINA (Debe ser lo primero)
+# 1. CONFIGURACIÓN DE PÁGINA (Debe ser lo primerito)
 st.set_page_config(layout="wide", page_title="Auditoría Adulto")
 
-# 2. DEFINICIÓN DE RUTAS ABSOLUTAS
-# Nos aseguramos de encontrar el archivo sin importar dónde se ejecute
-current_dir = Path(__file__).parent
-root_dir = current_dir.parent if current_dir.name == "pages" else current_dir
-path_parquet = root_dir / "data" / "reporte.parquet"
+# 2. FUNCIÓN DE CARGA DENTRO DE UN TRY-EXCEPT GLOBAL
+def ejecutar_aplicacion():
+    import polars as pl
+    import pandas as pd
+    from pathlib import Path
 
-# 3. CARGA DE METADATOS (Mínimo consumo de RAM)
-@st.cache_data(ttl=3600)
-def get_ipress_list():
+    # Localizar archivo
+    current_dir = Path(__file__).parent
+    root_dir = current_dir.parent if current_dir.name == "pages" else current_dir
+    path_parquet = root_dir / "data" / "reporte.parquet"
+
     if not path_parquet.exists():
-        return []
+        st.error(f"Archivo no encontrado en: {path_parquet}")
+        return
+
+    # --- SIDEBAR ---
+    st.sidebar.header("Filtros de Auditoría")
+    
+    # Carga ultra-ligera solo para nombres de IPRESS
     try:
-        # scan_parquet no lee el archivo, solo lo mapea. Muy ligero.
-        q = pl.scan_parquet(str(path_parquet)).select("Nombre_Establecimiento").unique().sort("Nombre_Establecimiento")
-        return q.collect()["Nombre_Establecimiento"].to_list()
-    except:
-        return []
-
-# 4. SIDEBAR - SELECCIÓN OBLIGATORIA
-st.sidebar.header("Filtros de Auditoría")
-opciones = get_ipress_list()
-
-# Intentar pre-seleccionar San Luis Bajo Grande
-default_ipress = [i for i in opciones if "SAN LUIS BAJO - GRANDE" in i.upper()]
-
-sel_ipress = st.sidebar.multiselect("🏥 Seleccione IPRESS", options=opciones, default=default_ipress)
-
-# 5. BLOQUEO DE SEGURIDAD
-if not sel_ipress:
-    st.warning("⚠️ Selecciona una IPRESS en el menú lateral para activar la auditoría.")
-    st.info("Esto evita que el servidor colapse por falta de memoria RAM.")
-    st.stop()
-
-# 6. PROCESAMIENTO FILTRADO (Solo para la IPRESS elegida)
-@st.cache_data(ttl=600)
-def procesar_data_adulta(ipress_list):
-    try:
-        # Solo cargamos a RAM lo que filtró el scan
-        lf = pl.scan_parquet(str(path_parquet))
+        @st.cache_data(ttl=600)
+        def get_ipress():
+            # Solo escaneamos una columna para no gastar RAM
+            return pl.scan_parquet(str(path_parquet)).select("Nombre_Establecimiento").unique().collect().get_column("Nombre_Establecimiento").sort().to_list()
         
-        # Filtros críticos antes de collect()
-        lf = lf.filter(
-            (pl.col("Nombre_Establecimiento").is_in(ipress_list)) &
-            (pl.col("Anio_Actual_Paciente") >= 30) &
-            (pl.col("Anio_Actual_Paciente") <= 59)
-        )
-        
-        # Seleccionamos solo columnas vitales para ahorrar espacio
-        cols = ["Fecha_Atencion", "Numero_Documento_Paciente", "Apellido_Paterno_Paciente", 
-                "Apellido_Materno_Paciente", "Nombres_Paciente", "Anio_Actual_Paciente", 
-                "Codigo_Item", "Valor_Lab", "Nombre_Establecimiento"]
-        
-        df = lf.select(cols).collect()
-        
-        # Formatear datos
-        df = df.with_columns([
-            pl.col("Fecha_Atencion").cast(pl.Date),
-            pl.col("Codigo_Item").cast(pl.Utf8).str.strip_chars(),
-            pl.col("Valor_Lab").cast(pl.Utf8).str.strip_chars().fill_null("")
-        ])
-        
-        # Crear ID de Columna
-        df = df.with_columns(
-            pl.when(pl.col("Codigo_Item") == "99801").then(pl.format("99801_{}", pl.col("Valor_Lab")))
-            .when(pl.col("Codigo_Item") == "96150.01").then(pl.format("96150.01_{}", pl.col("Valor_Lab")))
-            .otherwise(pl.col("Codigo_Item")).alias("ID_Col")
-        )
-        
-        return df
+        lista_ipress = get_ipress()
     except Exception as e:
-        return str(e)
+        st.error(f"Error al leer metadatos: {e}")
+        return
 
-# Ejecutar proceso
-data_f = procesar_data_adulta(sel_ipress)
+    target = "SAN LUIS BAJO - GRANDE"
+    default_ipress = [i for i in lista_ipress if target in i.upper()]
 
-if isinstance(data_f, str):
-    st.error(f"Error técnico: {data_f}")
-    st.stop()
+    sel_ipress = st.sidebar.multiselect("🏥 Seleccione IPRESS", options=lista_ipress, default=default_ipress)
 
-if data_f.is_empty():
-    st.info("No hay registros adultos para esta selección.")
-    st.stop()
+    if not sel_ipress:
+        st.info("👈 Seleccione una IPRESS para cargar los datos.")
+        st.stop()
 
-# 7. PIVOTADO Y TABLA FINAL
-codigos_paquete = [
-    "99801_TA", "99801_1", "96150.01_VARONES", "96150.01_MUJERES", "99401", "Z019", "Z017", 
-    "99209.02", "99209.03", "99199.22", "96150.02", "96150.03", "99402.09", "99173", 
-    "99401.16", "99401.33", "86703.01", "86318.01", "99401.34", "D0150", "99402.03", 
-    "90688", "Z030", "99199.58", "87342", "88141.01", "84152", "82270", "Z128", "99401.12"
-]
+    # --- PROCESAMIENTO ---
+    with st.spinner("Procesando datos..."):
+        try:
+            # Lazy Loading: No cargamos a RAM hasta el collect()
+            lf = pl.scan_parquet(str(path_parquet))
+            
+            # Filtros inmediatos (IPRESS y Edad)
+            lf = lf.filter(
+                (pl.col("Nombre_Establecimiento").is_in(sel_ipress)) &
+                (pl.col("Anio_Actual_Paciente").cast(pl.Int32) >= 30) &
+                (pl.col("Anio_Actual_Paciente") <= 59)
+            )
+            
+            # Solo las columnas necesarias
+            cols_ok = ["Fecha_Atencion", "Numero_Documento_Paciente", "Apellido_Paterno_Paciente", 
+                       "Apellido_Materno_Paciente", "Nombres_Paciente", "Codigo_Item", "Valor_Lab"]
+            
+            df = lf.select(cols_ok).collect()
 
-df_pivot = data_f.filter(pl.col("ID_Col").is_in(codigos_paquete)).pivot(
-    values="Fecha_Atencion", index="Numero_Documento_Paciente", on="ID_Col", aggregate_function="first"
-)
+            if df.is_empty():
+                st.warning("No hay datos para esta IPRESS.")
+                return
 
-# Unir con datos personales
-df_pers = data_f.select(["Numero_Documento_Paciente", "Apellido_Paterno_Paciente", 
-                         "Apellido_Materno_Paciente", "Nombres_Paciente", "Anio_Actual_Paciente"]).unique()
+            # Formateo
+            df = df.with_columns([
+                pl.col("Fecha_Atencion").cast(pl.Date),
+                pl.col("Codigo_Item").cast(pl.Utf8).str.strip_chars(),
+                pl.col("Valor_Lab").cast(pl.Utf8).str.strip_chars().fill_null("")
+            ])
 
-res = df_pers.join(df_pivot, on="Numero_Documento_Paciente", how="left").to_pandas()
+            # IDs para Pivot
+            df = df.with_columns(
+                pl.when(pl.col("Codigo_Item") == "99801").then(pl.format("99801_{}", pl.col("Valor_Lab")))
+                .when(pl.col("Codigo_Item") == "96150.01").then(pl.format("96150.01_{}", pl.col("Valor_Lab")))
+                .otherwise(pl.col("Codigo_Item")).alias("ID_Col")
+            )
 
-# Limpieza final para visualización
-for c in codigos_paquete:
-    if c not in res.columns: res[c] = None
+            # Lista de los 30 ítems
+            items = ["99801_TA", "99801_1", "96150.01_VARONES", "96150.01_MUJERES", "99401", "Z019", "Z017", 
+                     "99209.02", "99209.03", "99199.22", "96150.02", "96150.03", "99402.09", "99173", 
+                     "99401.16", "99401.33", "86703.01", "86318.01", "99401.34", "D0150", "99402.03", 
+                     "90688", "Z030", "99199.58", "87342", "88141.01", "84152", "82270", "Z128", "99401.12"]
 
-res["Avance %"] = (res[codigos_paquete].notna().sum(axis=1) / 30 * 100).round(1)
-res = res.fillna("❌")
+            # Pivotado
+            df_p = df.filter(pl.col("ID_Col").is_in(items)).pivot(
+                values="Fecha_Atencion", index="Numero_Documento_Paciente", on="ID_Col", aggregate_function="first"
+            )
 
-st.header("📊 Auditoría Adulto")
-st.dataframe(res, use_container_width=True)
+            # Info Personal
+            df_pers = df.select(["Numero_Documento_Paciente", "Apellido_Paterno_Paciente", 
+                                 "Apellido_Materno_Paciente", "Nombres_Paciente"]).unique()
+
+            # Unión y Pandas
+            res = df_pers.join(df_p, on="Numero_Documento_Paciente", how="left").to_pandas()
+            
+            for c in items:
+                if c not in res.columns: res[c] = None
+
+            res["Avance %"] = (res[items].notna().sum(axis=1) / 30 * 100).round(1)
+            res = res.fillna("❌")
+
+            st.header(f"Auditoría: {', '.join(sel_ipress)}")
+            st.dataframe(res, use_container_width=True)
+
+        except Exception as e:
+            st.error(f"Error en el procesamiento: {e}")
+
+# 3. LLAMADA CONTROLADA
+try:
+    ejecutar_aplicacion()
+except Exception as e:
+    st.error(f"Error fatal de inicio: {e}")
