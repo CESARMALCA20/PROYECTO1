@@ -305,56 +305,69 @@ _components.html("""
 </script>
 """, height=0)
 
-# ─── 3. CARGA DE DATOS (CONFIGURACIÓN LOCAL Y NUBE) ──────────────────────────
+# ─── 3. CARGA DE DATOS (CONFIGURACIÓN FRAGMENTADA POR IPRESS) ──────────────────────────
 import os
 import polars as pl
 import streamlit as st
+from pathlib import Path
 
-# Detecta la carpeta donde está este archivo (app.py)
-# Esto funcionará en tu D: y también en el servidor de Streamlit
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# 1. Definir rutas (Detecta si estamos en 'pages' o en la raíz)
+BASE_DIR = Path(__file__).resolve().parent
+if BASE_DIR.name == "pages":
+    BASE_DIR = BASE_DIR.parent
 
-# Si el código se ejecuta desde la carpeta 'pages', subimos un nivel para hallar 'data'
-if os.path.basename(BASE_DIR) == "pages":
-    BASE_DIR = os.path.dirname(BASE_DIR)
+# Ruta a la nueva carpeta de fragmentos
+DB_SPLIT_DIR = BASE_DIR / "data" / "db_split"
 
-# Construimos la ruta: dashboard_salud > data > reporte.parquet
-ARCHIVO_PARQUET = os.path.join(BASE_DIR, "data", "reporte.parquet")
-
-@st.cache_data
-def cargar_datos():
-    # Verificamos si el archivo existe en la ruta construida
-    if not os.path.exists(ARCHIVO_PARQUET):
-        return None
-    try:
-        # Leemos con Polars para máxima velocidad
-        df = pl.read_parquet(ARCHIVO_PARQUET)
-        
-        # Limpieza básica de espacios en nombres de columnas
-        df = df.rename({col: col.strip() for col in df.columns})
-        
-        return df
-    except Exception as e:
-        st.error(f"Error técnico al leer Parquet: {e}")
-        return None
-
-# Ejecución de la carga
-df_raw = cargar_datos()
-
-if df_raw is None:
-    st.error(f"⚠️ No se encontró el archivo en: {ARCHIVO_PARQUET}")
-    st.info("Asegúrate de que el archivo se llame 'reporte.parquet' y esté dentro de la carpeta 'data'.")
+# 2. Verificación de seguridad y listado de IPRESS
+if not DB_SPLIT_DIR.exists():
+    st.error(f"⚠️ No se encontró la carpeta: {DB_SPLIT_DIR}")
+    st.info("Asegúrate de haber subido la carpeta 'db_split' a GitHub dentro de 'data'.")
     st.stop()
 
-# ── Fecha de última modificación del Excel para el badge del topbar ──
+# Listamos los archivos .parquet disponibles
+archivos_parquet = sorted([f.name for f in DB_SPLIT_DIR.glob("*.parquet")])
+nombres_ipress = [f.replace(".parquet", "").replace("_", " ") for f in archivos_parquet]
+mapa_archivos = dict(zip(nombres_ipress, archivos_parquet))
+
+# 3. Selector en la barra lateral (Carga bajo demanda)
+st.sidebar.header("Opciones de Carga")
+# Valor por defecto sugerido
+default_ipress = "SAN LUIS BAJO - GRANDE"
+idx_default = 0
+if any(default_ipress in n for n in nombres_ipress):
+    idx_default = nombres_ipress.index(next(n for n in nombres_ipress if default_ipress in n))
+
+sel_ipress = st.sidebar.selectbox("🏥 Seleccione IPRESS", options=nombres_ipress, index=idx_default)
+
+@st.cache_data
+def cargar_datos_fragmentados(nombre_sel):
+    nombre_archivo = mapa_archivos[nombre_sel]
+    ruta_archivo = DB_SPLIT_DIR / nombre_archivo
+    try:
+        # Carga solo el pedacito seleccionado (Veloz y ligero)
+        df = pl.read_parquet(str(ruta_archivo))
+        # Limpieza de nombres de columnas
+        df = df.rename({col: col.strip() for col in df.columns})
+        return df, ruta_archivo
+    except Exception as e:
+        st.error(f"Error técnico al leer el fragmento: {e}")
+        return None, None
+
+# Ejecución de la carga (Aquí nace el df_raw que usa el resto de tu código)
+df_raw, ruta_usada = cargar_datos_fragmentados(sel_ipress)
+
+if df_raw is None:
+    st.stop()
+
+# ── Fecha de última modificación (para el badge del topbar) ──
 import datetime as _dt
 try:
-    _mtime   = os.path.getmtime(ARCHIVO_PARQUET)
+    _mtime = os.path.getmtime(ruta_usada)
     _fecha_excel = _dt.datetime.fromtimestamp(_mtime).strftime("%d/%m/%Y %H:%M")
 except Exception:
     _fecha_excel = "N/D"
 
-# Reemplazar el placeholder en el HTML ya renderizado (usando JS inline al cargar)
 st.markdown(f"""<script>
 (function(){{
     var badge = document.getElementById('topbar-badge-fecha');
