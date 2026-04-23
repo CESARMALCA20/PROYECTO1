@@ -5,80 +5,78 @@ import os
 
 # --- CONFIGURACIÓN DE PÁGINA ---
 pd.set_option("styler.render.max_elements", 1000000) 
-st.set_page_config(layout="wide", page_title="Auditoría Final - San Pablo")
+st.set_page_config(layout="wide", page_title="Auditoría Adulto - San Pablo")
 
-# ─── 1. CARGA DE DATOS (CONFIGURACIÓN LOCAL Y NUBE) ──────────────────────────
+# ─── 1. CARGA DE DATOS ROBUSTA ───────────────────────────────────────────────
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-# Aseguramos que suba un nivel si estamos dentro de 'pages'
 if os.path.basename(BASE_DIR) == "pages":
     BASE_DIR = os.path.dirname(BASE_DIR)
 
 ARCHIVO_PARQUET = os.path.join(BASE_DIR, "data", "reporte.parquet")
 
 @st.cache_data
-def cargar_datos():
+def cargar_datos_seguros():
     if not os.path.exists(ARCHIVO_PARQUET):
         return None
     try:
-        # Forzamos motor pyarrow para evitar errores en el servidor Linux de Streamlit
+        # Forzamos pyarrow para Linux (Streamlit Cloud)
         df = pl.read_parquet(ARCHIVO_PARQUET, use_pyarrow=True)
-        # Limpieza de nombres de columnas
         df = df.rename({col: col.strip() for col in df.columns})
+        
+        # PROCESAMOS FECHAS AQUÍ MISMO para que el sidebar no falle
+        df = df.with_columns([
+            pl.col("Fecha_Atencion").cast(pl.Date),
+            pl.col("Fecha_Atencion").dt.month().alias("Mes_Num"),
+            pl.col("Fecha_Atencion").dt.strftime("%B").alias("Mes_Nombre")
+        ])
+        
+        # Traducción inmediata
+        meses_es = {
+            "January": "ENERO", "February": "FEBRERO", "March": "MARZO", "April": "ABRIL",
+            "May": "MAYO", "June": "JUNIO", "July": "JULIO", "August": "AGOSTO",
+            "September": "SETIEMBRE", "October": "OCTUBRE", "November": "NOVIEMBRE", "December": "DICIEMBRE"
+        }
+        df = df.with_columns(pl.col("Mes_Nombre").replace(meses_es))
+        
         return df
     except Exception as e:
-        st.error(f"Error técnico al leer Parquet: {e}")
         return None
 
-df_raw = cargar_datos()
+df_raw = cargar_datos_seguros()
 
+# Si falla la carga, mostramos error y detenemos antes de que intente hacer filtros
 if df_raw is None:
-    st.error(f"⚠️ No se encontró el archivo en: {ARCHIVO_PARQUET}")
+    st.error("⚠️ Error: No se pudo cargar la base de datos. Verifica que 'data/reporte.parquet' exista en GitHub.")
     st.stop()
 
-# ─── 2. REPARACIÓN DE COLUMNAS DE TIEMPO (Antes de filtros) ──────────────────
-df_raw = df_raw.with_columns([
-    pl.col("Fecha_Atencion").cast(pl.Date),
-    pl.col("Fecha_Atencion").dt.month().alias("Mes_Num"),
-    pl.col("Fecha_Atencion").dt.strftime("%B").alias("Mes_Nombre")
-])
-
-# Traducción de meses a español
-meses_es = {
-    "January": "ENERO", "February": "FEBRERO", "March": "MARZO", "April": "ABRIL",
-    "May": "MAYO", "June": "JUNIO", "July": "JULIO", "August": "AGOSTO",
-    "September": "SETIEMBRE", "October": "OCTUBRE", "November": "NOVIEMBRE", "December": "DICIEMBRE"
-}
-df_raw = df_raw.with_columns(pl.col("Mes_Nombre").replace(meses_es))
-
-# ─── 3. SIDEBAR: FILTROS ─────────────────────────────────────────────────────
+# ─── 2. FILTROS (SIDEBAR) ────────────────────────────────────────────────────
 st.sidebar.header("Opciones de Filtrado")
 
-# Filtro IPRESS con búsqueda flexible para el valor por defecto
-lista_ipress = sorted([str(i).strip() for i in df_raw["Nombre_Establecimiento"].unique().to_list()])
+# Filtro IPRESS - Buscamos la IPRESS por defecto de forma segura
+lista_ipress = sorted(df_raw["Nombre_Establecimiento"].unique().to_list())
 target_name = "SAN LUIS BAJO - GRANDE"
-# Si no encuentra el nombre exacto, la selección inicial queda vacía para evitar errores
-default_selection = [i for i in lista_ipress if target_name.upper() in i.upper()]
+default_sel = [i for i in lista_ipress if target_name in i]
 
-sel_ipress = st.sidebar.multiselect("🏥 IPRESS", options=lista_ipress, default=default_selection)
+sel_ipress = st.sidebar.multiselect("🏥 IPRESS", options=lista_ipress, default=default_sel)
 
-# Filtro Mes
+# Filtro Mes - Ya tenemos Mes_Nombre porque lo creamos en cargar_datos_seguros
 df_meses_lista = df_raw.select(["Mes_Num", "Mes_Nombre"]).unique().sort("Mes_Num")
 sel_mes = st.sidebar.multiselect("📅 Mes de Atención", options=df_meses_lista["Mes_Nombre"].to_list())
 
 sel_dni = st.sidebar.text_input("🔍 Buscar por DNI")
 
-# Aplicar filtros base
-df_f = df_raw.with_columns(pl.col("Nombre_Establecimiento").str.strip_chars())
+# ─── 3. PROCESAMIENTO DE DATOS ───────────────────────────────────────────────
+# Filtrar por edad Adulto
+df_f = df_raw.filter((pl.col("Anio_Actual_Paciente") >= 30) & (pl.col("Anio_Actual_Paciente") <= 59))
 
-# Filtro de Edad Adulto (30-59)
-df_f = df_f.filter((pl.col("Anio_Actual_Paciente") >= 30) & (pl.col("Anio_Actual_Paciente") <= 59))
+if sel_ipress:
+    df_f = df_f.filter(pl.col("Nombre_Establecimiento").is_in(sel_ipress))
+if sel_mes:
+    df_f = df_f.filter(pl.col("Mes_Nombre").is_in(sel_mes))
+if sel_dni:
+    df_f = df_f.filter(pl.col("Numero_Documento_Paciente").cast(pl.Utf8).str.contains(sel_dni))
 
-if sel_ipress: df_f = df_f.filter(pl.col("Nombre_Establecimiento").is_in(sel_ipress))
-if sel_mes: df_f = df_f.filter(pl.col("Mes_Nombre").is_in(sel_mes))
-if sel_dni: df_f = df_f.filter(pl.col("Numero_Documento_Paciente").cast(pl.Utf8).str.contains(sel_dni))
-
-# --- CONFIGURACIÓN DE LOS 30 ÍTEMS ---
+# CONFIGURACIÓN DE LOS 30 ÍTEMS (ID, Columna_Destino, Titulo_Visual)
 ITEMS_CONFIG = [
     ("99801", "99801_TA", "99801\nPLAN ELABORADO"), ("99801", "99801_1", "99801\nPLAN EJECUTADO"),
     ("96150.01", "96150.01_VARONES", "96150.01\nVIF (VARONES)"), ("96150.01", "96150.01_MUJERES", "96150.01\nVIF (MUJERES)"),
@@ -97,92 +95,59 @@ ITEMS_CONFIG = [
     ("Z128", "Z128", "Z128\nCANCER PIEL"), ("99401.12", "99401.12", "99401.12\nESTILOS VIDA")
 ]
 
-# ─── 4. PROCESAMIENTO ────────────────────────────────────────────────────────
 if not df_f.is_empty():
+    # Pivotado y limpieza
     df_f = df_f.with_columns([
         pl.col("Codigo_Item").cast(pl.Utf8).str.strip_chars(),
         pl.col("Valor_Lab").cast(pl.Utf8).str.strip_chars().fill_null(""),
         (pl.col("Apellido_Paterno_Personal") + " " + pl.col("Apellido_Materno_Personal") + " " + pl.col("Nombres_Personal")).alias("Profesional")
     ])
 
-    codigos_lista = [c[0] for c in ITEMS_CONFIG]
+    codigos_validos = [c[0] for c in ITEMS_CONFIG]
     
-    def asignar_columna_pivot(row):
-        cod = row["Codigo_Item"]
-        vlab = row["Valor_Lab"]
-        if cod == "99801":
-            return f"99801_{vlab}" if vlab in ["TA", "1"] else None
-        if cod == "96150.01":
-            return f"96150.01_{vlab}" if vlab in ["VARONES", "MUJERES"] else None
-        return cod if cod in codigos_lista else None
+    def asignar_id(row):
+        cod, lab = row["Codigo_Item"], row["Valor_Lab"]
+        if cod == "99801": return f"99801_{lab}" if lab in ["TA", "1"] else None
+        if cod == "96150.01": return f"96150.01_{lab}" if lab in ["VARONES", "MUJERES"] else None
+        return cod if cod in codigos_validos else None
 
     df_proc = df_f.with_columns([
-        pl.struct(["Codigo_Item", "Valor_Lab"]).map_elements(asignar_columna_pivot, return_dtype=pl.Utf8).alias("ID_Columna"),
+        pl.struct(["Codigo_Item", "Valor_Lab"]).map_elements(asignar_id, return_dtype=pl.Utf8).alias("ID_Columna"),
         pl.struct(["Fecha_Atencion", "Valor_Lab"]).map_elements(
-            lambda x: f"{x['Fecha_Atencion'].strftime('%d/%m/%Y')} ({x['Valor_Lab']})" if x['Valor_Lab'] != "" else x['Fecha_Atencion'].strftime('%d/%m/%Y'),
+            lambda x: f"{x['Fecha_Atencion'].strftime('%d/%m/%Y')} ({x['Valor_Lab']})" if x['Valor_Lab'] else x['Fecha_Atencion'].strftime('%d/%m/%Y'),
             return_dtype=pl.Utf8
-        ).alias("Contenido_Celda")
+        ).alias("Contenido")
     ]).filter(pl.col("ID_Columna").is_not_null())
 
     if not df_proc.is_empty():
-        df_pivot = df_proc.pivot(
-            values="Contenido_Celda", index="Numero_Documento_Paciente", on="ID_Columna", aggregate_function="first"
-        )
-
-        cols_paciente = ["Fecha_Atencion", "Lote", "Num_Pag", "Num_Reg", "Nombre_Establecimiento", 
-                         "Numero_Documento_Paciente", "Apellido_Paterno_Paciente", "Apellido_Materno_Paciente", 
-                         "Nombres_Paciente", "Anio_Actual_Paciente", "Genero", "Descripcion_Financiador", "Profesional"]
+        df_piv = df_proc.pivot(values="Contenido", index="Numero_Documento_Paciente", on="ID_Columna", aggregate_function="first")
         
-        df_info = (
-            df_proc.select(cols_paciente)
-            .unique(subset=["Numero_Documento_Paciente"], keep="last")
-            .with_columns(pl.col("Fecha_Atencion").dt.strftime("%d/%m/%Y"))
-        )
-
-        df_final = df_info.join(df_pivot, on="Numero_Documento_Paciente", how="left").to_pandas()
-
-        ids_pivot = [c[1] for c in ITEMS_CONFIG]
-        mapeo_visual = {c[1]: c[2] for c in ITEMS_CONFIG}
+        df_info = df_proc.select(["Fecha_Atencion", "Lote", "Num_Pag", "Num_Reg", "Nombre_Establecimiento", 
+                                  "Numero_Documento_Paciente", "Apellido_Paterno_Paciente", "Apellido_Materno_Paciente", 
+                                  "Nombres_Paciente", "Anio_Actual_Paciente", "Genero", "Descripcion_Financiador", "Profesional"]).unique(subset=["Numero_Documento_Paciente"])
         
-        for col_id in ids_pivot:
+        df_final = df_info.join(df_piv, on="Numero_Documento_Paciente", how="left").to_pandas()
+
+        # Asegurar todas las columnas y renombrar
+        for _, col_id, titulo in ITEMS_CONFIG:
             if col_id not in df_final.columns: df_final[col_id] = None
-        
-        df_final = df_final.rename(columns=mapeo_visual)
-        columnas_indicadores = list(mapeo_visual.values())
-        
-        df_final["Realizados"] = df_final[columnas_indicadores].notna().sum(axis=1)
-        df_final["Faltan"] = 30 - df_final["Realizados"]
+            df_final = df_final.rename(columns={col_id: titulo})
+
+        titulos = [c[2] for c in ITEMS_CONFIG]
+        df_final["Realizados"] = df_final[titulos].notna().sum(axis=1)
         df_final["Avance %"] = ((df_final["Realizados"] / 30) * 100).round(1)
+        df_final[titulos] = df_final[titulos].fillna("❌")
 
-        columnas_datos = ["Fecha_Atencion", "Lote", "Num_Pag", "Num_Reg", "Nombre_Establecimiento", 
-                          "Numero_Documento_Paciente", "Apellido_Paterno_Paciente", "Apellido_Materno_Paciente", 
-                          "Nombres_Paciente", "Anio_Actual_Paciente", "Genero", "Descripcion_Financiador", "Profesional"]
-        
-        nuevo_orden = columnas_datos + ["Realizados", "Faltan", "Avance %"] + columnas_indicadores
-        df_final = df_final[nuevo_orden]
-        df_final[columnas_indicadores] = df_final[columnas_indicadores].fillna("❌")
-
-        df_final = df_final.sort_values(by="Avance %", ascending=False)
-        df_final = df_final.reset_index(drop=True)
-        df_final.index = df_final.index + 1
-
-        st.markdown('<h2 style="color:#38bdf8;text-align:center;">SEGUIMIENTO DE PAQUETE ADULTO - RED SAN PABLO 2026</h2>', unsafe_allow_html=True)
+        # --- INTERFAZ ---
+        st.markdown(f'<h2 style="color:#38bdf8;text-align:center;">PAQUETE ADULTO: {", ".join(sel_ipress) if sel_ipress else "TODOS"}</h2>', unsafe_allow_html=True)
         
         m1, m2, m3 = st.columns(3)
-        m1.metric("Pacientes Evaluados", len(df_final))
-        m2.metric("Completos (100%)", len(df_final[df_final["Avance %"] >= 99.9]))
-        m3.metric("Avance Promedio", f"{df_final['Avance %'].mean():.1f}%")
+        m1.metric("Pacientes", len(df_final))
+        m2.metric("Avance Promedio", f"{df_final['Avance %'].mean():.1f}%")
+        m3.metric("Filtro Mes", ", ".join(sel_mes) if sel_mes else "Todos")
 
-        st.dataframe(
-            df_final.style.format({"Avance %": "{:.1f}"})
-            .map(lambda x: 'color: #ff4b4b;' if x == "❌" else 'color: #28a745;', subset=columnas_indicadores)
-            .map(lambda val: f'background-color: {"#28a745" if val >= 99.9 else "#f1c40f" if val >= 50 else "#ff4b4b"}; color: white; font-weight: bold', subset=["Avance %"]),
-            use_container_width=True, height=650
-        )
-        
-        csv = df_final.to_csv(index=False).encode('utf-8')
-        st.download_button("📥 Descargar Reporte en CSV", csv, "auditoria_san_pablo.csv", "text/csv")
+        st.dataframe(df_final, use_container_width=True, height=600)
     else:
-        st.warning("No se encontraron registros de pacientes adultos con los filtros seleccionados.")
+        st.warning("No hay datos para los filtros seleccionados.")
 else:
-    st.info("Ajuste los filtros laterales (IPRESS y Mes) para visualizar los datos.")
+    st.info("Seleccione filtros en el sidebar para comenzar.")
