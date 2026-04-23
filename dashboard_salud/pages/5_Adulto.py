@@ -21,15 +21,15 @@ def cargar_datos():
     if not os.path.exists(ARCHIVO_PARQUET):
         return None
     try:
-        df = pl.read_parquet(ARCHIVO_PARQUET)
-        # Limpieza de nombres de columnas
+        # Forzamos el uso de pyarrow, que es el estándar en servidores
+        df = pl.read_parquet(ARCHIVO_PARQUET, use_pyarrow=True)
+        
         df = df.rename({col: col.strip() for col in df.columns})
         return df
     except Exception as e:
-        st.error(f"Error técnico al leer Parquet: {e}")
+        # Esto te dirá el error real en la pantalla si algo falla
+        st.error(f"Error al cargar Parquet: {e}")
         return None
-
-df_raw = cargar_datos()
 
 if df_raw is None:
     st.error(f"⚠️ No se encontró el archivo en: {ARCHIVO_PARQUET}")
