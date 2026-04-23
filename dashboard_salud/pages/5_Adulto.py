@@ -7,10 +7,10 @@ import os
 pd.set_option("styler.render.max_elements", 1000000) 
 st.set_page_config(layout="wide", page_title="Auditoría Final - San Pablo")
 
-# ─── 3. CARGA DE DATOS (CONFIGURACIÓN LOCAL Y NUBE) ──────────────────────────
+# ─── 1. CARGA DE DATOS (CONFIGURACIÓN LOCAL Y NUBE) ──────────────────────────
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Si el script está en la carpeta 'pages', subimos un nivel para hallar 'data'
+# Aseguramos que suba un nivel si estamos dentro de 'pages'
 if os.path.basename(BASE_DIR) == "pages":
     BASE_DIR = os.path.dirname(BASE_DIR)
 
@@ -21,19 +21,62 @@ def cargar_datos():
     if not os.path.exists(ARCHIVO_PARQUET):
         return None
     try:
-        # Forzamos el uso de pyarrow, que es el estándar en servidores
+        # Forzamos motor pyarrow para evitar errores en el servidor Linux de Streamlit
         df = pl.read_parquet(ARCHIVO_PARQUET, use_pyarrow=True)
-        
+        # Limpieza de nombres de columnas
         df = df.rename({col: col.strip() for col in df.columns})
         return df
     except Exception as e:
-        # Esto te dirá el error real en la pantalla si algo falla
-        st.error(f"Error al cargar Parquet: {e}")
+        st.error(f"Error técnico al leer Parquet: {e}")
         return None
+
+df_raw = cargar_datos()
 
 if df_raw is None:
     st.error(f"⚠️ No se encontró el archivo en: {ARCHIVO_PARQUET}")
     st.stop()
+
+# ─── 2. REPARACIÓN DE COLUMNAS DE TIEMPO (Antes de filtros) ──────────────────
+df_raw = df_raw.with_columns([
+    pl.col("Fecha_Atencion").cast(pl.Date),
+    pl.col("Fecha_Atencion").dt.month().alias("Mes_Num"),
+    pl.col("Fecha_Atencion").dt.strftime("%B").alias("Mes_Nombre")
+])
+
+# Traducción de meses a español
+meses_es = {
+    "January": "ENERO", "February": "FEBRERO", "March": "MARZO", "April": "ABRIL",
+    "May": "MAYO", "June": "JUNIO", "July": "JULIO", "August": "AGOSTO",
+    "September": "SETIEMBRE", "October": "OCTUBRE", "November": "NOVIEMBRE", "December": "DICIEMBRE"
+}
+df_raw = df_raw.with_columns(pl.col("Mes_Nombre").replace(meses_es))
+
+# ─── 3. SIDEBAR: FILTROS ─────────────────────────────────────────────────────
+st.sidebar.header("Opciones de Filtrado")
+
+# Filtro IPRESS con búsqueda flexible para el valor por defecto
+lista_ipress = sorted([str(i).strip() for i in df_raw["Nombre_Establecimiento"].unique().to_list()])
+target_name = "SAN LUIS BAJO - GRANDE"
+# Si no encuentra el nombre exacto, la selección inicial queda vacía para evitar errores
+default_selection = [i for i in lista_ipress if target_name.upper() in i.upper()]
+
+sel_ipress = st.sidebar.multiselect("🏥 IPRESS", options=lista_ipress, default=default_selection)
+
+# Filtro Mes
+df_meses_lista = df_raw.select(["Mes_Num", "Mes_Nombre"]).unique().sort("Mes_Num")
+sel_mes = st.sidebar.multiselect("📅 Mes de Atención", options=df_meses_lista["Mes_Nombre"].to_list())
+
+sel_dni = st.sidebar.text_input("🔍 Buscar por DNI")
+
+# Aplicar filtros base
+df_f = df_raw.with_columns(pl.col("Nombre_Establecimiento").str.strip_chars())
+
+# Filtro de Edad Adulto (30-59)
+df_f = df_f.filter((pl.col("Anio_Actual_Paciente") >= 30) & (pl.col("Anio_Actual_Paciente") <= 59))
+
+if sel_ipress: df_f = df_f.filter(pl.col("Nombre_Establecimiento").is_in(sel_ipress))
+if sel_mes: df_f = df_f.filter(pl.col("Mes_Nombre").is_in(sel_mes))
+if sel_dni: df_f = df_f.filter(pl.col("Numero_Documento_Paciente").cast(pl.Utf8).str.contains(sel_dni))
 
 # --- CONFIGURACIÓN DE LOS 30 ÍTEMS ---
 ITEMS_CONFIG = [
@@ -54,47 +97,7 @@ ITEMS_CONFIG = [
     ("Z128", "Z128", "Z128\nCANCER PIEL"), ("99401.12", "99401.12", "99401.12\nESTILOS VIDA")
 ]
 
-# --- SIDEBAR: FILTROS ---
-st.sidebar.header("Opciones de Filtrado")
-
-# 1. Reparación de columnas de tiempo (Para evitar ColumnNotFoundError)
-df_raw = df_raw.with_columns([
-    pl.col("Fecha_Atencion").cast(pl.Date),
-    pl.col("Fecha_Atencion").dt.month().alias("Mes_Num"),
-    pl.col("Fecha_Atencion").dt.strftime("%B").alias("Mes_Nombre")
-])
-
-# Traducción de meses a español
-meses_es = {
-    "January": "ENERO", "February": "FEBRERO", "March": "MARZO", "April": "ABRIL",
-    "May": "MAYO", "June": "JUNIO", "July": "JULIO", "August": "AGOSTO",
-    "September": "SETIEMBRE", "October": "OCTUBRE", "November": "NOVIEMBRE", "December": "DICIEMBRE"
-}
-df_raw = df_raw.with_columns(pl.col("Mes_Nombre").replace(meses_es))
-
-# Filtro IPRESS
-lista_ipress = sorted([str(i).strip() for i in df_raw["Nombre_Establecimiento"].unique().to_list()])
-target_name = "SAN LUIS BAJO - GRANDE"
-default_selection = [i for i in lista_ipress if target_name in i]
-sel_ipress = st.sidebar.multiselect("🏥 IPRESS", options=lista_ipress, default=default_selection)
-
-# Filtro Mes
-df_meses_lista = df_raw.select(["Mes_Num", "Mes_Nombre"]).unique().sort("Mes_Num")
-sel_mes = st.sidebar.multiselect("📅 Mes de Atención", options=df_meses_lista["Mes_Nombre"].to_list())
-
-sel_dni = st.sidebar.text_input("🔍 Buscar por DNI")
-
-# Aplicar filtros base
-df_f = df_raw.with_columns(pl.col("Nombre_Establecimiento").str.strip_chars())
-
-# Filtro de Edad Adulto (30-59)
-df_f = df_f.filter((pl.col("Anio_Actual_Paciente") >= 30) & (pl.col("Anio_Actual_Paciente") <= 59))
-
-if sel_ipress: df_f = df_f.filter(pl.col("Nombre_Establecimiento").is_in(sel_ipress))
-if sel_mes: df_f = df_f.filter(pl.col("Mes_Nombre").is_in(sel_mes))
-if sel_dni: df_f = df_f.filter(pl.col("Numero_Documento_Paciente").cast(pl.Utf8).str.contains(sel_dni))
-
-# --- PROCESAMIENTO ---
+# ─── 4. PROCESAMIENTO ────────────────────────────────────────────────────────
 if not df_f.is_empty():
     df_f = df_f.with_columns([
         pl.col("Codigo_Item").cast(pl.Utf8).str.strip_chars(),
@@ -180,6 +183,6 @@ if not df_f.is_empty():
         csv = df_final.to_csv(index=False).encode('utf-8')
         st.download_button("📥 Descargar Reporte en CSV", csv, "auditoria_san_pablo.csv", "text/csv")
     else:
-        st.warning("No se encontraron registros de pacientes adultos.")
+        st.warning("No se encontraron registros de pacientes adultos con los filtros seleccionados.")
 else:
-    st.info("Ajuste los filtros laterales para visualizar los datos.")
+    st.info("Ajuste los filtros laterales (IPRESS y Mes) para visualizar los datos.")
