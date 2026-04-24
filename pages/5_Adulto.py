@@ -2,12 +2,13 @@ import streamlit as st
 import polars as pl
 import pandas as pd
 import os
+import re
 
 # ─── CONFIGURACIÓN DE PÁGINA ──────────────────────────────────────────────────
 pd.set_option("styler.render.max_elements", 1000000)
 st.set_page_config(
     layout="wide",
-    page_title="Auditoría Adulto - Red San Pablo",
+    page_title="Adulto - Red San Pablo",
     page_icon="🏥",
     initial_sidebar_state="expanded"
 )
@@ -314,13 +315,13 @@ with st.sidebar:
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="sidebar-section">', unsafe_allow_html=True)
-    sel_dni = st.text_input("🔍 Buscar por DNI")
+    # Usamos text_input para que se vea como una sola línea elegante
+    sel_dni_raw = st.text_input("🔍 Buscar DNI(s)", placeholder="Ej: 70286548, 48066431...")
     st.markdown('</div>', unsafe_allow_html=True)
 
-    st.markdown("---")
     st.markdown(
         '<p style="font-size:0.68rem;color:#94a3b8;text-align:center;letter-spacing:0.05em;">'
-        'RED SAN PABLO · ADULTO 30-59 AÑOS<br>© 2026 AUDITORÍA FINAL</p>',
+        'RED SAN PABLO · ADULTO 30-59 AÑOS<br>© 2026</p>',
         unsafe_allow_html=True
     )
 
@@ -353,10 +354,18 @@ if sel_ipress:
     df_base = df_base.filter(pl.col("Nombre_Establecimiento").is_in(sel_ipress))
 if sel_mes:
     df_base = df_base.filter(pl.col("Mes_Nombre").is_in(sel_mes))
-if sel_dni:
-    df_base = df_base.filter(
-        pl.col("Numero_Documento_Paciente").cast(pl.Utf8).str.contains(sel_dni)
-    )
+
+if sel_dni_raw:
+    # Esto sigue funcionando igual de bien para 1 o 100 DNIs en una línea
+    lista_dni = re.findall(r'\d+', sel_dni_raw)
+    
+    if lista_dni:
+        df_base = df_base.filter(
+            pl.col("Numero_Documento_Paciente")
+            .cast(pl.Utf8)
+            .str.strip_chars()
+            .is_in(lista_dni)
+        )
 
 # ─── PROCESAMIENTO ────────────────────────────────────────────────────────────
 if not df_base.is_empty():
